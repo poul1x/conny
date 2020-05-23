@@ -7,7 +7,6 @@ import solver
 import traceback
 
 GET_TIMEOUT = 5
-INPUT_QUEUE_PATH = 'data/input_queue.json'
 OUTPUT_QUEUE_PATH = 'data/output_queue.json'
 
 thread_stop = False
@@ -19,34 +18,23 @@ logger = logging.getLogger('solver')
 
 class LoadTask:
 
-    def __init__(self, load_addr, libc_addr, target_addr, ctx):
+    def __init__(self, load_addr, libc_addr, target_addr, ctx, length):
         self.load_addr = load_addr
         self.libc_addr = libc_addr
         self.target_addr = target_addr
+        self.length = length
         self.ctx = ctx
 
 
 class SolverTask:
 
-    def __init__(self, buf, buf_addr, taint, cmp_addr):
+    def __init__(self, buf, buf_addr, taint, taint_offs, cmp_addr):
 
         self.buf_addr = buf_addr
         self.cmp_addr = cmp_addr
+        self.taint_offs = taint_offs
         self.taint = taint
         self.buf = buf
-
-    @staticmethod
-    def deserialize(data):
-        return SolverTask(data['buf'], data['buf_addr'],
-                          data['taint'], data['cmp_addr'])
-
-    def serialize(self):
-        return {
-            'buf': self.buf,
-            'buf_addr': self.buf_addr,
-            'taint': self.taint,
-            'cmp_addr': self.cmp_addr,
-        }
 
 
 class SolverResult:
@@ -133,10 +121,52 @@ def put_task(task):
 
 
 def get_result():
+
     global output_queue
-    item = queue_get(output_queue)
+    if output_queue.empty():
+        return None
+
+    item = output_queue.get()
     assert isinstance(item, SolverResult)
-    return item
+    return item.buf
+
+
+def fix_input_data_length(length):
+
+    global output_queue
+
+    if output_queue.empty():
+        tc = SolverResult(b'A' * length)
+        output_queue.put_nowait(tc)
+        return
+
+    while True:
+        item = output_queue.get_nowait()
+        item_len = len(item.buf)
+
+        if length == item_len:
+            break
+        elif length < item_len:
+            item.buf = item.buf[:length]
+        else:
+            item.buf = item.buf + b'A' * (length - item_len)
+
+        output_queue.put_nowait(item)
+
+
+def initialize_solver():
+
+    global load_queue
+
+    item = queue_get(load_queue)
+    if not item:
+        return False
+
+    fix_input_data_length(item.length)
+    solver.load_binary(item.load_addr, item.libc_addr,
+                       item.target_addr, item.ctx)
+
+    return True
 
 
 def do_processing():
@@ -147,11 +177,9 @@ def do_processing():
         raise KeyboardInterrupt()
 
     if not solver.is_initialized():
-        item = queue_get(load_queue)
-        if item:
-            solver.load_binary(item.load_addr, item.libc_addr,
-                               item.target_addr, item.ctx)
-        return
+        res = initialize_solver()
+        if not res:
+            return
 
     item = queue_get(input_queue)
     if thread_stop:
@@ -161,16 +189,20 @@ def do_processing():
     if not item:
         return
 
+    taint = item.taint
+    taint_offs = item.taint_offs
+    cmp_addr = item.cmp_addr
+
     res, buf1, buf2 = solver.solve_path_constraints(
-        item.buf, item.buf_addr, item.taint, item.cmp_addr)
+        item.buf.encode(), item.buf_addr, taint, taint_offs, cmp_addr)
 
     if res:
         output_queue.put(SolverResult(buf1))
         output_queue.put(SolverResult(buf2))
-        msg = f'Constraint solved: cmp_addr={item.cmp_addr} taint={item.taint}'
+        msg = f'Constraint solved: cmp_addr={hex(cmp_addr)} taint=0x{item.taint}'
         logger.info(msg)
     else:
-        msg = f'Constraint not solved: cmp_addr={item.cmp_addr} taint={item.taint}'
+        msg = f'Constraint not solved: cmp_addr={hex(cmp_addr)} taint=0x{item.taint}'
         logger.error(msg)
 
 
@@ -194,9 +226,8 @@ def start_thread():
     # Load processed inems and those were not
     # Then move not processed items back to test cases queue
     queue_load(output_queue, OUTPUT_QUEUE_PATH, SolverResult)
-    queue_load(input_queue, INPUT_QUEUE_PATH, SolverTask)
-    queue_merge_blob(output_queue, input_queue)
 
+    # Start thread
     th = threading.Thread(name='solver', target=worker)
     th.start()
     return th
@@ -208,5 +239,5 @@ def stop_thread(th):
     thread_stop = True
     th.join()
 
+    queue_merge_blob(output_queue, input_queue)
     queue_dump(output_queue, OUTPUT_QUEUE_PATH)
-    queue_dump(input_queue, INPUT_QUEUE_PATH)

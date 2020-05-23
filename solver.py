@@ -6,26 +6,46 @@ import logging
 root = logging.getLogger()
 root.setLevel(logging.INFO)
 
-PROGRAM = 'target'
-LIBC = 'libc'
+angr_logger = logging.getLogger('pyvex.expr')
+angr_logger.setLevel(logging.WARNING)
+angr_logger = logging.getLogger('angr.project')
+angr_logger.setLevel(logging.WARNING)
+angr_logger = logging.getLogger('cle.loader')
+angr_logger.setLevel(logging.WARNING)
+angr_logger = logging.getLogger('angr.sim_manager')
+angr_logger.setLevel(logging.WARNING)
+angr_logger = logging.getLogger('angr.engines.engine')
+angr_logger.setLevel(logging.WARNING)
+
+PROGRAM = 'bin/target'
+LIBC = 'bin/libc'
+
+sim_opts = {
+    angr.options.SYMBOL_FILL_UNCONSTRAINED_MEMORY,
+    angr.options.SYMBOL_FILL_UNCONSTRAINED_REGISTERS,
+}
 
 project = None
 state = None
 
+
 def is_initialized():
     return project is not None and state is not None
+
 
 def load_binary(load_addr, libc_addr, target_addr, ctx):
 
     global project, state
 
     # Load program to be analyzed and setup its context
-    project = angr.Project(PROGRAM, main_opts={'base_addr': load_addr},
-                        lib_opts={LIBC : {'base_addr' : libc_addr}})
+    project = angr.Project(PROGRAM,
+                           main_opts={'base_addr': load_addr},
+                           lib_opts={LIBC: {'base_addr': libc_addr}})
 
-    state = project.factory.blank_state(addr=target_addr)
+    state = project.factory.blank_state(
+        addr=target_addr, add_options=sim_opts)
+
     regs = state.regs
-
     regs.r0 = ctx['r0']
     regs.r1 = ctx['r1']
     regs.r2 = ctx['r2']
@@ -43,17 +63,14 @@ def load_binary(load_addr, libc_addr, target_addr, ctx):
     regs.lr = ctx['lr']
     regs.flags = ctx['flags']
 
+
 def find_branches(cmp_addr):
 
     global project
 
-    sim_opts = {
-        angr.options.SYMBOL_FILL_UNCONSTRAINED_MEMORY,
-        angr.options.SYMBOL_FILL_UNCONSTRAINED_REGISTERS,
-    }
-
     # Find 2 possible branches cmp leads to
-    state_cmp = project.factory.blank_state(addr=cmp_addr, add_options=sim_opts)
+    state_cmp = project.factory.blank_state(
+        addr=cmp_addr, add_options=sim_opts)
     simulation = project.factory.simgr(state_cmp)
     simulation.step()
 
@@ -62,21 +79,22 @@ def find_branches(cmp_addr):
     branch2 = simulation.active[1].addr
     return branch1, branch2
 
-def solve_path_constraints(buf, buf_addr, taint, cmp_addr):
+
+def solve_path_constraints(buf, buf_addr, taint, taint_offs, cmp_addr):
 
     global project, state
 
     # Set buffer concrete value
     buf_len = len(buf)
-    content = claripy.BVV(buf.encode(), buf_len * 8)
+    content = claripy.BVV(buf, buf_len * 8)
     state.memory.store(buf_addr, content)
 
     # Process tainted bytes
     tainted = [
-        int(taint[0:2],16),
-        int(taint[2:4],16),
-        int(taint[4:6],16),
-        int(taint[6:8],16),
+        int(taint[0:2], 16),
+        int(taint[2:4], 16),
+        int(taint[4:6], 16),
+        int(taint[6:8], 16),
     ]
 
     # Get unique bytes and remove those
@@ -89,7 +107,7 @@ def solve_path_constraints(buf, buf_addr, taint, cmp_addr):
     sym_bytes = []
     for offs in tainted:
         sym_byte = claripy.BVS('t', 8)
-        state.memory.store(buf_addr + offs - 1, sym_byte)
+        state.memory.store(buf_addr + offs + taint_offs - 1, sym_byte)
         sym_bytes.append(sym_byte)
 
     # Launch simulation and explore paths
@@ -103,16 +121,16 @@ def solve_path_constraints(buf, buf_addr, taint, cmp_addr):
     # Retrieve solutions
     assert len(simulation.found) == 2
 
-    res_branch1 = bytes()
-    for sym_byte in sym_bytes:
+    res_branch1 = bytearray(buf[:])
+    for i, sym_byte in enumerate(sym_bytes):
         solution_state = simulation.found[0]
         res_byte = solution_state.solver.eval(sym_byte, cast_to=bytes)
-        res_branch1 += res_byte
+        res_branch1[i + taint_offs] = int(res_byte[0])
 
-    res_branch2 = bytes()
-    for sym_byte in sym_bytes:
+    res_branch2 = bytearray(buf[:])
+    for i, sym_byte in enumerate(sym_bytes):
         solution_state = simulation.found[1]
         res_byte = solution_state.solver.eval(sym_byte, cast_to=bytes)
-        res_branch2 += res_byte
+        res_branch2[i + taint_offs] = int(res_byte[0])
 
     return True, res_branch1, res_branch2
