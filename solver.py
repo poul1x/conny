@@ -2,6 +2,14 @@ import angr
 import claripy
 import monkeyhex
 import logging
+from dataclasses import dataclass
+
+@dataclass
+class SymByteTainted:
+    taint_offset: int
+    sym_byte: claripy.BVS
+    def __hash__(self):
+        return self.taint_offset
 
 root = logging.getLogger()
 root.setLevel(logging.INFO)
@@ -79,15 +87,17 @@ def find_branches(cmp_addr):
     branch2 = simulation.active[1].addr
     return branch1, branch2
 
+I = 0
 
 def solve_path_constraints(buf, buf_addr, taint, taint_offs, cmp_addr):
 
-    global project, state
+    global project, state, I
 
     # Set buffer concrete value
     buf_len = len(buf)
     content = claripy.BVV(buf, buf_len * 8)
     state.memory.store(buf_addr, content)
+    I += 1
 
     # Process tainted bytes
     tainted = [
@@ -103,34 +113,44 @@ def solve_path_constraints(buf, buf_addr, taint, taint_offs, cmp_addr):
     tainted.discard(0)
 
     # Set buffer symbolic values
-    # and remember to shift left by 1
-    sym_bytes = []
+    sym_bytes_tainted = set()
     for offs in tainted:
         sym_byte = claripy.BVS('t', 8)
-        state.memory.store(buf_addr + offs + taint_offs - 1, sym_byte)
-        sym_bytes.append(sym_byte)
+        global_offs = offs + taint_offs - 1
+        state.memory.store(buf_addr + global_offs, sym_byte)
+        sym_bytes_tainted.add(SymByteTainted(global_offs, sym_byte))
 
     # Launch simulation and explore paths
     # from the beginning of target function
     simulation = project.factory.simgr(state)
-    simulation.explore(find=list(find_branches(cmp_addr)))
 
-    if not simulation.found:
-        return False, bytes(), bytes()
+    while True:
+
+        simulation.explore(find=list(find_branches(cmp_addr)))
+        cnt_found = len(simulation.found)
+
+        if cnt_found == 0:
+            return False, bytes(), bytes()
+        if cnt_found == 2:
+            break
+
+        assert cnt_found == 1
+        simulation.move(from_stash='found', to_stash='active')
+        simulation.step()
 
     # Retrieve solutions
-    assert len(simulation.found) == 2
-
     res_branch1 = bytearray(buf[:])
-    for i, sym_byte in enumerate(sym_bytes):
-        solution_state = simulation.found[0]
-        res_byte = solution_state.solver.eval(sym_byte, cast_to=bytes)
-        res_branch1[i + taint_offs] = int(res_byte[0])
-
     res_branch2 = bytearray(buf[:])
-    for i, sym_byte in enumerate(sym_bytes):
+
+    for sbt in sym_bytes_tainted:
+
+        solution_state = simulation.found[0]
+        res_byte = solution_state.solver.eval(sbt.sym_byte, cast_to=bytes)
+        res_branch1[sbt.taint_offset] = int(res_byte[0])
+
         solution_state = simulation.found[1]
-        res_byte = solution_state.solver.eval(sym_byte, cast_to=bytes)
-        res_branch2[i + taint_offs] = int(res_byte[0])
+        res_byte = solution_state.solver.eval(sbt.sym_byte, cast_to=bytes)
+        res_branch2[sbt.taint_offset] = int(res_byte[0])
+
 
     return True, res_branch1, res_branch2
