@@ -35,21 +35,23 @@ sim_opts = {
 
 project = None
 state = None
+max_length = 0
 
 
 def is_initialized():
     return project is not None and state is not None
 
 
-def load_binary(load_addr, libc_addr, target_addr, ctx):
+def load_binary(load_addr, libc_addr, target_addr, ctx, length):
 
-    global project, state
+    global project, state, max_length
 
     # Load program to be analyzed and setup its context
     project = angr.Project(PROGRAM,
                            main_opts={'base_addr': load_addr},
                            lib_opts={LIBC: {'base_addr': libc_addr}})
 
+    max_length = length
     state = project.factory.blank_state(
         addr=target_addr, add_options=sim_opts)
 
@@ -91,13 +93,12 @@ I = 0
 
 def solve_path_constraints(buf, buf_addr, taint, taint_offs, cmp_addr):
 
-    global project, state, I
+    global project, state, max_length
 
     # Set buffer concrete value
     buf_len = len(buf)
     content = claripy.BVV(buf, buf_len * 8)
     state.memory.store(buf_addr, content)
-    I += 1
 
     # Process tainted bytes
     tainted = [
@@ -124,12 +125,13 @@ def solve_path_constraints(buf, buf_addr, taint, taint_offs, cmp_addr):
     # from the beginning of target function
     simulation = project.factory.simgr(state)
 
+    i = 0
     while True:
 
         simulation.explore(find=list(find_branches(cmp_addr)))
         cnt_found = len(simulation.found)
 
-        if cnt_found == 0:
+        if cnt_found == 0 or i > max_length:
             return False, bytes(), bytes()
         if cnt_found == 2:
             break
@@ -137,6 +139,7 @@ def solve_path_constraints(buf, buf_addr, taint, taint_offs, cmp_addr):
         assert cnt_found == 1
         simulation.move(from_stash='found', to_stash='active')
         simulation.step()
+        i += 1
 
     # Retrieve solutions
     res_branch1 = bytearray(buf[:])

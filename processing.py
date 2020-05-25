@@ -1,5 +1,4 @@
 import os
-import json
 import queue
 import logging
 import threading
@@ -7,7 +6,8 @@ import solver
 import traceback
 
 GET_TIMEOUT = 5
-OUTPUT_QUEUE_PATH = 'data/output_queue.json'
+OUTPUT_QUEUE_PATH = 'data/output_queue.bin'
+TESTCASES = 'data/testcases.bin'
 
 thread_stop = False
 load_queue = queue.Queue()
@@ -64,38 +64,31 @@ def queue_get(q, nowait=False):
         return item
 
 
-def queue_get_all_items(q):
-
-    data = []
-    while True:
-        item = queue_get(q, nowait=True)
-        if not item:
-            break
-        else:
-            data.append(item.serialize())
-
-    return data
-
-
 def queue_dump(q, filepath):
-    items = queue_get_all_items(q)
-    with open(filepath, 'w') as f:
-        json.dump(items, f)
+
+    with open(filepath, 'wb') as f:
+        while True:
+            item = queue_get(q, nowait=True)
+            if not item:
+                break
+
+            assert isinstance(item, SolverResult)
+            f.write(item.buf)
+            f.write(b'\n')
 
 
-def queue_load(q, filepath, class_):
+def queue_load(q, filepath):
 
     if not os.path.exists(filepath):
         return
 
-    with open(filepath, 'r') as f:
-        json_data = json.load(f)
-    queue_put_all_items(q, json_data, class_)
-
-
-def queue_put_all_items(q, items_list, class_):
-    for item in items_list:
-        q.put_nowait(class_.deserialize(item))
+    with open(filepath, 'rb') as f:
+        while True:
+            line = f.readline()[:-1]
+            if not line:
+                break
+            else:
+                q.put_nowait(SolverResult(line))
 
 
 def queue_merge_blob(q1, q2):
@@ -164,8 +157,10 @@ def initialize_solver():
 
     fix_input_data_length(item.length)
     solver.load_binary(item.load_addr, item.libc_addr,
-                       item.target_addr, item.ctx)
+                       item.target_addr, item.ctx, item.length)
 
+    logger.info('Binary loaded at 0x%08x, target=0x%08x' %
+                (item.load_addr, item.target_addr))
     return True
 
 
@@ -201,6 +196,11 @@ def do_processing():
         output_queue.put(SolverResult(buf2))
         msg = f'Constraint solved: cmp_addr={hex(cmp_addr)} taint=0x{item.taint}'
         logger.info(msg)
+
+        with open(TESTCASES, "ab") as f:
+            f.write(buf1 + b'\n')
+            f.write(buf2 + b'\n')
+
     else:
         msg = f'Constraint not solved: cmp_addr={hex(cmp_addr)} taint=0x{item.taint}'
         logger.error(msg)
@@ -225,7 +225,8 @@ def start_thread():
 
     # Load processed inems and those were not
     # Then move not processed items back to test cases queue
-    queue_load(output_queue, OUTPUT_QUEUE_PATH, SolverResult)
+    queue_load(output_queue, OUTPUT_QUEUE_PATH)
+    open(TESTCASES, "wb").close()
 
     # Start thread
     th = threading.Thread(name='solver', target=worker)
