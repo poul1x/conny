@@ -30,7 +30,7 @@ async def load_binary(request):
             ctx[j] = int(ctx[j], 16)
 
         task = processing.LoadTask(load_addr, libc_addr, target_addr, ctx, tc_length)
-        processing.load_file(task)
+        processing.put_task(task)
 
     except KeyError as e:
         return web.Response(text='Required parameter is not set: %s' % str(e), status=400)

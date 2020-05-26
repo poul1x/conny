@@ -6,8 +6,9 @@ import solver
 import traceback
 
 GET_TIMEOUT = 5
-OUTPUT_QUEUE_PATH = 'data/output_queue.bin'
-TESTCASES = 'data/testcases.bin'
+DATA_DIR = 'data'
+OUTPUT_QUEUE_PATH = DATA_DIR + '/output_queue.bin'
+TESTCASES = DATA_DIR + '/testcases.bin'
 
 thread_stop = False
 load_queue = queue.Queue()
@@ -42,15 +43,6 @@ class SolverResult:
     def __init__(self, buf):
         self.buf = buf
 
-    @staticmethod
-    def deserialize(data):
-        return SolverResult(data['buf'])
-
-    def serialize(self):
-        return {
-            'buf': self.buf,
-        }
-
 
 def queue_get(q, nowait=False):
     try:
@@ -64,33 +56,6 @@ def queue_get(q, nowait=False):
         return item
 
 
-def queue_dump(q, filepath):
-
-    with open(filepath, 'wb') as f:
-        while True:
-            item = queue_get(q, nowait=True)
-            if not item:
-                break
-
-            assert isinstance(item, SolverResult)
-            f.write(item.buf)
-            f.write(b'\n')
-
-
-def queue_load(q, filepath):
-
-    if not os.path.exists(filepath):
-        return
-
-    with open(filepath, 'rb') as f:
-        while True:
-            line = f.readline()[:-1]
-            if not line:
-                break
-            else:
-                q.put_nowait(SolverResult(line))
-
-
 def queue_merge_blob(q1, q2):
 
     while True:
@@ -101,16 +66,15 @@ def queue_merge_blob(q1, q2):
             q1.put_nowait(SolverResult(item.buf))
 
 
-def load_file(task):
-    global load_queue
-    assert isinstance(task, LoadTask)
-    load_queue.put(task)
-
-
 def put_task(task):
-    global input_queue
-    assert isinstance(task, SolverTask)
-    input_queue.put(task)
+    global input_queue, load_queue
+
+    if isinstance(task, SolverTask):
+        input_queue.put(task)
+    elif isinstance(task, LoadTask):
+        load_queue.put(task)
+    else:
+        assert False, "Unexpected task type"
 
 
 def get_result():
@@ -223,10 +187,11 @@ def start_thread():
 
     global input_queue, output_queue
 
-    # Load processed inems and those were not
-    # Then move not processed items back to test cases queue
-    queue_load(output_queue, OUTPUT_QUEUE_PATH)
+    if not os.path.exists(DATA_DIR):
+        os.mkdir(DATA_DIR)
+
     open(TESTCASES, "wb").close()
+    open(OUTPUT_QUEUE_PATH, "wb").close()
 
     # Start thread
     th = threading.Thread(name='solver', target=worker)
@@ -239,6 +204,3 @@ def stop_thread(th):
     global thread_stop
     thread_stop = True
     th.join()
-
-    queue_merge_blob(output_queue, input_queue)
-    queue_dump(output_queue, OUTPUT_QUEUE_PATH)
