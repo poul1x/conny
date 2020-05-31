@@ -14,10 +14,15 @@ async def load_binary(request):
 
     try:
 
+        load_opts = {k[5:]: v for k, v in post_data.items()
+                     if k.startswith('base.')}
+
+        for k in load_opts.keys():
+            load_opts[k] = {'base_addr': int(load_opts[k], 16)}
+
         tc_length = int(post_data['tc_length'], 16)
-        load_addr = int(post_data['load_addr'], 16)
-        libc_addr = int(post_data['libc_addr'], 16)
         target_addr = int(post_data['target_addr'], 16)
+
         ctx = {k[4:]: v for k, v in post_data.items()
                if k.startswith('ctx.')}
 
@@ -29,7 +34,7 @@ async def load_binary(request):
             j = 'r' + str(i)
             ctx[j] = int(ctx[j], 16)
 
-        task = processing.LoadTask(load_addr, libc_addr, target_addr, ctx, tc_length)
+        task = processing.LoadTask(load_opts, target_addr, ctx, tc_length)
         processing.put_task(task)
 
     except KeyError as e:
@@ -49,7 +54,8 @@ async def solve_path_constraints(request):
         taint_offs = int(post_data['taint_offs'], 16)
         cmp_addr = int(post_data['cmp_addr'], 16)
 
-        task = processing.SolverTask(buf, buf_addr, taint, taint_offs, cmp_addr)
+        task = processing.SolverTask(buf, buf_addr, taint,
+                                     taint_offs, cmp_addr)
         processing.put_task(task)
 
     except KeyError as e:

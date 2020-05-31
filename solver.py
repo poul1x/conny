@@ -4,12 +4,19 @@ import monkeyhex
 import logging
 from dataclasses import dataclass
 
+
+class SolverError(Exception):
+    pass
+
+
 @dataclass
 class SymByteTainted:
     taint_offset: int
     sym_byte: claripy.BVS
+
     def __hash__(self):
         return self.taint_offset
+
 
 root = logging.getLogger()
 root.setLevel(logging.INFO)
@@ -25,8 +32,7 @@ angr_logger.setLevel(logging.WARNING)
 angr_logger = logging.getLogger('angr.engines.engine')
 angr_logger.setLevel(logging.WARNING)
 
-PROGRAM = 'bin/target'
-LIBC = 'bin/libc'
+PROGRAM = 'drtaint_marker_app'
 
 sim_opts = {
     angr.options.SYMBOL_FILL_UNCONSTRAINED_MEMORY,
@@ -42,14 +48,15 @@ def is_initialized():
     return project is not None and state is not None
 
 
-def load_binary(load_addr, libc_addr, target_addr, ctx, length):
+def load_binary(load_opts, target_addr, ctx, length):
 
     global project, state, max_length
 
     # Load program to be analyzed and setup its context
-    project = angr.Project(PROGRAM,
-                           main_opts={'base_addr': load_addr},
-                           lib_opts={LIBC: {'base_addr': libc_addr}})
+    project = angr.Project('bin/' + PROGRAM,
+                           main_opts=load_opts[PROGRAM],
+                           lib_opts=load_opts,
+                           use_sim_procedures=False)
 
     max_length = length
     state = project.factory.blank_state(
@@ -74,17 +81,24 @@ def load_binary(load_addr, libc_addr, target_addr, ctx, length):
     regs.flags = ctx['flags']
 
 
-def find_branches(cmp_addr):
+def find_branches(cmp_addr, max_steps=5):
 
     global project
 
     # Find 2 possible branches cmp leads to
     state_cmp = project.factory.blank_state(
         addr=cmp_addr, add_options=sim_opts)
-    simulation = project.factory.simgr(state_cmp)
-    simulation.step()
 
-    assert len(simulation.active) == 2
+    steps = 0
+    simulation = project.factory.simgr(state_cmp)
+
+    while steps < max_steps and len(simulation.active) != 2:
+        simulation.step(num_inst=1)
+        steps += 1
+
+    if len(simulation.active) != 2:
+        raise SolverError(f'Unable to find branches from 0x%08x' % cmp_addr)
+
     branch1 = simulation.active[0].addr
     branch2 = simulation.active[1].addr
     return branch1, branch2
@@ -93,7 +107,9 @@ I = 0
 
 def solve_path_constraints(buf, buf_addr, taint, taint_offs, cmp_addr):
 
-    global project, state, max_length
+    global project, state, max_length, I
+
+    I+=1
 
     # Set buffer concrete value
     buf_len = len(buf)
@@ -124,21 +140,24 @@ def solve_path_constraints(buf, buf_addr, taint, taint_offs, cmp_addr):
     # Launch simulation and explore paths
     # from the beginning of target function
     simulation = project.factory.simgr(state)
+    branch1, branch2 = find_branches(cmp_addr)
 
     i = 0
     while True:
 
-        simulation.explore(find=list(find_branches(cmp_addr)))
+        simulation.explore(find=[branch1, branch2])
         cnt_found = len(simulation.found)
 
         if cnt_found == 0 or i > max_length:
-            return False, bytes(), bytes()
+            info = '(cmp_addr=0x%08x, taint=0x%s)' % (cmp_addr, taint)
+            raise SolverError('Failed to solve path constraints ' + info)
         if cnt_found == 2:
             break
 
         assert cnt_found == 1
         simulation.move(from_stash='found', to_stash='active')
         simulation.step()
+
         i += 1
 
     # Retrieve solutions
@@ -155,5 +174,4 @@ def solve_path_constraints(buf, buf_addr, taint, taint_offs, cmp_addr):
         res_byte = solution_state.solver.eval(sbt.sym_byte, cast_to=bytes)
         res_branch2[sbt.taint_offset] = int(res_byte[0])
 
-
-    return True, res_branch1, res_branch2
+    return res_branch1, res_branch2

@@ -3,7 +3,6 @@ import queue
 import logging
 import threading
 import solver
-import traceback
 
 GET_TIMEOUT = 5
 DATA_DIR = 'data'
@@ -19,9 +18,8 @@ logger = logging.getLogger('solver')
 
 class LoadTask:
 
-    def __init__(self, load_addr, libc_addr, target_addr, ctx, length):
-        self.load_addr = load_addr
-        self.libc_addr = libc_addr
+    def __init__(self, load_opts, target_addr, ctx, length):
+        self.load_opts = load_opts
         self.target_addr = target_addr
         self.length = length
         self.ctx = ctx
@@ -120,11 +118,10 @@ def initialize_solver():
         return False
 
     fix_input_data_length(item.length)
-    solver.load_binary(item.load_addr, item.libc_addr,
-                       item.target_addr, item.ctx, item.length)
+    solver.load_binary(item.load_opts, item.target_addr,
+                       item.ctx, item.length)
 
-    logger.info('Binary loaded at 0x%08x, target=0x%08x' %
-                (item.load_addr, item.target_addr))
+    logger.info('Binary loaded target=0x%08x' % item.target_addr)
     return True
 
 
@@ -152,22 +149,18 @@ def do_processing():
     taint_offs = item.taint_offs
     cmp_addr = item.cmp_addr
 
-    res, buf1, buf2 = solver.solve_path_constraints(
-        item.buf.encode(), item.buf_addr, taint, taint_offs, cmp_addr)
+    buf1, buf2 = solver.solve_path_constraints(
+        item.buf.encode(), item.buf_addr,
+        taint, taint_offs, cmp_addr)
 
-    if res:
-        output_queue.put(SolverResult(buf1))
-        output_queue.put(SolverResult(buf2))
-        msg = f'Constraint solved: cmp_addr={hex(cmp_addr)} taint=0x{item.taint}'
-        logger.info(msg)
+    output_queue.put(SolverResult(buf1))
+    output_queue.put(SolverResult(buf2))
+    msg = f'Constraint solved: cmp_addr={hex(cmp_addr)} taint=0x{item.taint}'
+    logger.info(msg)
 
-        with open(TESTCASES, "ab") as f:
-            f.write(buf1 + b'\n')
-            f.write(buf2 + b'\n')
-
-    else:
-        msg = f'Constraint not solved: cmp_addr={hex(cmp_addr)} taint=0x{item.taint}'
-        logger.error(msg)
+    with open(TESTCASES, "ab") as f:
+        f.write(buf1 + b'\n')
+        f.write(buf2 + b'\n')
 
 
 def worker():
@@ -177,8 +170,10 @@ def worker():
             do_processing()
         except KeyboardInterrupt:
             break
+        except solver.SolverError as e:
+            logger.error(str(e))
         except:
-            logger.exception(traceback.format_exc())
+            logger.exception('Unexpected error')
 
     logger.info('Solving is interrupted. Thread is stopped')
 
